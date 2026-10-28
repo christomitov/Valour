@@ -76,7 +76,9 @@ public static partial class SecurityHeaders
     /// </summary>
     public static string BuildAppPolicy(IEnumerable<string> inlineScriptHashes, bool isDevelopment)
     {
-        var scriptSources = new List<string> { "'self'", "'wasm-unsafe-eval'" };
+        // AudioWorklet modules, including the Krisp noise filter, are loaded from
+        // blob: URLs created in the page, so script-src has to allow them.
+        var scriptSources = new List<string> { "'self'", "'wasm-unsafe-eval'", "blob:" };
         scriptSources.AddRange(inlineScriptHashes.Select(h => $"'{h}'"));
         scriptSources.AddRange(ThirdPartyScriptSources);
 
