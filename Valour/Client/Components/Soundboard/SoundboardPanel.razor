@@ -166,7 +166,15 @@
         try
         {
             var playing = await Js.InvokeAsync<bool>("valourSoundboard.play", sound.Url, 1.0);
-            _status = playing ? "Playing: " + sound.Name : "Join a voice channel to play sounds";
+
+            if (playing)
+            {
+                _status = "Playing: " + sound.Name;
+            }
+            else
+            {
+                _status = await Js.InvokeAsync<string>("valourSoundboard.status");
+            }
         }
         catch (Exception ex)
         {

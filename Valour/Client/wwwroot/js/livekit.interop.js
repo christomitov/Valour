@@ -476,7 +476,7 @@ function loadKrispModule() {
 }
 
 function noiseFilterSettings() {
-    const settings = { enabled: true, quality: "medium" };
+    const settings = { enabled: true, quality: "medium", gate: 0 };
 
     try {
         if (window.localStorage.getItem("valour.noiseFilter.enabled") === "false")
@@ -485,6 +485,10 @@ function noiseFilterSettings() {
         const quality = window.localStorage.getItem("valour.noiseFilter.quality");
         if (quality === "low" || quality === "medium" || quality === "high")
             settings.quality = quality;
+
+        const gate = Number(window.localStorage.getItem("valour.noiseGate.threshold"));
+        if (Number.isFinite(gate) && gate > 0)
+            settings.gate = Math.min(100, Math.max(0, Math.round(gate)));
     } catch (error) {
         console.warn("[valour] Unable to read noise filter settings", error);
     }
@@ -499,24 +503,25 @@ async function attachNoiseFilter(track) {
 
     const settings = noiseFilterSettings();
 
-    try {
-        let krisp = null;
-        if (settings.enabled) {
-            try {
-                krisp = await loadKrispModule();
-            } catch (error) {
-                console.warn("[valour] Krisp noise filter unavailable", error);
-            }
+    let krisp = null;
 
-            if (krisp && typeof krisp.KrispNoiseFilter !== "function") {
-                krisp = null;
-            }
-
-            if (krisp && typeof krisp.isKrispNoiseFilterSupported === "function" && !krisp.isKrispNoiseFilterSupported()) {
-                krisp = null;
-            }
+    if (settings.enabled) {
+        try {
+            krisp = await loadKrispModule();
+        } catch (error) {
+            console.warn("[valour] Krisp noise filter unavailable", error);
         }
 
+        if (krisp && typeof krisp.KrispNoiseFilter !== "function") {
+            krisp = null;
+        }
+
+        if (krisp && typeof krisp.isKrispNoiseFilterSupported === "function" && !krisp.isKrispNoiseFilterSupported()) {
+            krisp = null;
+        }
+    }
+
+    try {
         noiseFilterAttached.add(track);
 
         const mixer = window.valourSoundboard;
@@ -525,9 +530,23 @@ async function attachNoiseFilter(track) {
         } else if (krisp) {
             await track.setProcessor(krisp.KrispNoiseFilter({ quality: settings.quality }));
         }
+
+        window.valourLastMixerError = null;
     } catch (error) {
         noiseFilterAttached.delete(track);
+        window.valourLastMixerError = error;
         console.warn("[valour] microphone processor unavailable", error);
+
+        // Never publish a raw microphone: if the mixer chain failed, at least
+        // keep the noise filter attached so background noise is still removed.
+        if (krisp) {
+            try {
+                await track.setProcessor(krisp.KrispNoiseFilter({ quality: settings.quality }));
+                noiseFilterAttached.add(track);
+            } catch (fallbackError) {
+                console.warn("[valour] Krisp fallback failed", fallbackError);
+            }
+        }
     }
 }
 

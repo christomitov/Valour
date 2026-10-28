@@ -106,6 +106,16 @@
             </div>
         }
 
+        <div class="toggle-item">
+            <div class="toggle-header">
+                <span class="toggle-title">Input sensitivity</span>
+                <span class="toggle-value">@NoiseGateLabel</span>
+            </div>
+            <input class="sensitivity-slider" style="width: 100%; accent-color: #5865f2; margin: 6px 0 4px;"
+                   type="range" min="0" max="100" step="1" value="@_noiseGate" @onchange="OnChangeNoiseGate" />
+            <p class="toggle-description">Microphone audio quieter than this is muted, like Discord's squelch. 0 turns the gate off. Applies the next time you turn your microphone on.</p>
+        </div>
+
         <div class="actions">
             @if (ShouldShowMicPermissionButton)
             {
@@ -437,6 +447,9 @@
 
     private bool _noiseSuppressionEnabled = true;
     private string _noiseSuppressionQuality = "medium";
+    private int _noiseGate;
+
+    private string NoiseGateLabel => _noiseGate == 0 ? "Off" : _noiseGate + "%";
 
     private async Task LoadNoiseSuppressionStateAsync()
     {
@@ -446,6 +459,19 @@
         var quality = await LocalStorage.GetStringAsync("valour.noiseFilter.quality");
         if (quality is "low" or "medium" or "high")
             _noiseSuppressionQuality = quality;
+
+        var gate = await LocalStorage.GetStringAsync("valour.noiseGate.threshold");
+        if (int.TryParse(gate, out var gateValue))
+            _noiseGate = Math.Clamp(gateValue, 0, 100);
+    }
+
+    private async Task OnChangeNoiseGate(ChangeEventArgs e)
+    {
+        if (!int.TryParse(e.Value?.ToString(), out var value))
+            return;
+
+        _noiseGate = Math.Clamp(value, 0, 100);
+        await LocalStorage.SetStringAsync("valour.noiseGate.threshold", _noiseGate.ToString());
     }
 
     private async Task SwitchNoiseSuppression()
