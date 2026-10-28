@@ -440,6 +440,64 @@ export async function init(options, sdkLoadTimeoutMs = 20000, initTimeoutMs = 15
     pendingConnect = { serverUrl, token };
 }
 
+// LiveKit's Krisp noise filter runs as a client-side track processor on the
+// microphone capture, so peers receive cleaned audio instead of keystrokes and
+// room noise. Loaded lazily: the bundle is several MB and most sessions never
+// publish audio.
+const KRISP_SCRIPT_PATH = "_content/Valour.Client/js/krisp-noise-filter.umd.js";
+const KRISP_GLOBAL_NAME = "LiveKit Noise Filter";
+let krispLoadPromise = null;
+const noiseFilterAttached = new WeakSet();
+
+function loadKrispModule() {
+    if (krispLoadPromise) {
+        return krispLoadPromise;
+    }
+
+    krispLoadPromise = new Promise((resolve, reject) => {
+        const scope = getGlobalScope();
+        if (scope && scope[KRISP_GLOBAL_NAME]) {
+            resolve(scope[KRISP_GLOBAL_NAME]);
+            return;
+        }
+
+        const script = document.createElement("script");
+        script.src = KRISP_SCRIPT_PATH;
+        script.async = true;
+        script.onload = () => resolve(getGlobalScope()[KRISP_GLOBAL_NAME]);
+        script.onerror = () => reject(new Error("Failed to load the Krisp noise filter"));
+        document.head.appendChild(script);
+    }).catch((error) => {
+        krispLoadPromise = null;
+        throw error;
+    });
+
+    return krispLoadPromise;
+}
+
+async function attachNoiseFilter(track) {
+    if (!track || typeof track.setProcessor !== "function" || noiseFilterAttached.has(track)) {
+        return;
+    }
+
+    try {
+        const krisp = await loadKrispModule();
+        if (!krisp || typeof krisp.KrispNoiseFilter !== "function") {
+            return;
+        }
+
+        if (typeof krisp.isKrispNoiseFilterSupported === "function" && !krisp.isKrispNoiseFilterSupported()) {
+            return;
+        }
+
+        noiseFilterAttached.add(track);
+        await track.setProcessor(krisp.KrispNoiseFilter());
+    } catch (error) {
+        noiseFilterAttached.delete(track);
+        console.warn("[valour] Krisp noise filter unavailable", error);
+    }
+}
+
 export async function joinRoom(timeoutMs = 25000) {
     const activeRoom = getRoomOrThrow();
     if (!pendingConnect) {
@@ -451,6 +509,12 @@ export async function joinRoom(timeoutMs = 25000) {
         timeoutMs,
         `Timed out joining voice room after ${timeoutMs}ms.`
     );
+
+    activeRoom.on("localTrackPublished", (publication) => {
+        if (publication.source === "microphone" && publication.track) {
+            void attachNoiseFilter(publication.track);
+        }
+    });
 }
 
 export async function leaveRoom(endCall = false) {
@@ -472,6 +536,14 @@ export async function leaveRoom(endCall = false) {
 export async function enableAudio() {
     const local = getRoomOrThrow().localParticipant;
     await local.setMicrophoneEnabled(true);
+
+    const publication = typeof local.getTrackPublication === "function"
+        ? local.getTrackPublication("microphone")
+        : null;
+
+    if (publication && publication.track) {
+        await attachNoiseFilter(publication.track);
+    }
 }
 
 export async function disableAudio() {
