@@ -24,6 +24,20 @@
     const bufferCache = new Map();
     const activeSources = new Set();
     let mixer = null;
+    let meter = null;
+
+    function stopMeter() {
+        if (!meter) {
+            return;
+        }
+
+        clearInterval(meter.timer);
+
+        try { meter.stream.getAudioTracks().forEach(track => track.stop()); } catch (error) { /* already stopped */ }
+        try { meter.context.close(); } catch (error) { /* already closed */ }
+
+        meter = null;
+    }
 
     function createContext() {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -44,27 +58,51 @@
             const inputTrack = options.track;
             let micTrack = inputTrack;
 
-            if (this.krisp && this.settings.enabled) {
-                try {
-                    const processor = this.krisp.KrispNoiseFilter({ quality: this.settings.quality });
-                    const result = await processor.init({ track: inputTrack });
-                    if (result && result.processedTrack) {
-                        micTrack = result.processedTrack;
-                    }
-                } catch (error) {
-                    console.warn("[valour] Krisp failed, publishing the raw microphone", error);
-                }
-            }
-
             const context = createContext();
 
             // Do not await resume(). An autoplay-blocked context leaves that
             // promise pending, which previously aborted the whole processor and
             // left the microphone raw, with no Krisp and no mixer.
-            const resume = context.resume();
-            if (resume && typeof resume.catch === "function") {
-                resume.catch(error => console.warn("[valour] audio context resume failed", error));
+            try {
+                const resume = context.resume();
+                if (resume && typeof resume.catch === "function") {
+                    resume.catch(error => console.warn("[valour] audio context resume failed", error));
+                }
+            } catch (error) {
+                console.warn("[valour] audio context resume failed", error);
             }
+
+            window.valourMixerStage = "context";
+
+            if (this.krisp && this.settings.enabled) {
+                try {
+                    const processor = this.krisp.KrispNoiseFilter({ quality: this.settings.quality });
+
+                    // Krisp reads options.audioContext.sampleRate during init, so
+                    // the context and a media element have to be supplied or it
+                    // throws immediately and the microphone stays raw.
+                    const result = await processor.init({
+                        kind: "audio",
+                        track: inputTrack,
+                        element: document.createElement("audio"),
+                        audioContext: context
+                    });
+
+                    if (result && result.processedTrack) {
+                        micTrack = result.processedTrack;
+                        window.valourKrispState = "active";
+                    } else {
+                        window.valourKrispState = "no processed track";
+                    }
+                } catch (error) {
+                    window.valourKrispState = "failed: " + (error && error.message ? error.message : String(error));
+                    console.warn("[valour] Krisp failed, publishing the raw microphone", error);
+                }
+            } else {
+                window.valourKrispState = this.krisp ? "disabled" : "not loaded";
+            }
+
+            window.valourMixerStage = "krisp";
 
             const micSource = context.createMediaStreamSource(new MediaStream([micTrack]));
             const destination = context.createMediaStreamDestination();
@@ -80,6 +118,7 @@
                 micSource.connect(destination);
             }
 
+            window.valourMixerStage = "attached";
             mixer = this;
 
             return {
@@ -201,7 +240,7 @@
         isInCall: () => !!mixer,
         status() {
             if (mixer) {
-                return "In call";
+                return "In call, Krisp " + (window.valourKrispState || "unknown");
             }
 
             if (window.valourLastMixerError) {
@@ -221,6 +260,75 @@
             if (mixer) {
                 mixer.stopAll();
             }
+        },
+        async postSound(url) {
+            const response = await fetch("/sb/sound", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ query: url })
+            });
+
+            return await response.text();
+        },
+        async postStop() {
+            const response = await fetch("/sb/stop", { method: "POST" });
+            return await response.text();
+        },
+        async startMicMeter(fillId, threshold) {
+            stopMeter();
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const context = createContext();
+
+                const resume = context.resume();
+                if (resume && typeof resume.catch === "function") {
+                    resume.catch(() => { /* autoplay blocked, the analyser still reads */ });
+                }
+
+                const source = context.createMediaStreamSource(stream);
+                const analyser = context.createAnalyser();
+                analyser.fftSize = 512;
+                analyser.smoothingTimeConstant = 0.4;
+                source.connect(analyser);
+
+                const samples = new Float32Array(analyser.fftSize);
+                const cutoff = typeof threshold === "number" ? threshold : 0;
+
+                meter = {
+                    stream,
+                    context,
+                    timer: setInterval(() => {
+                        const fill = document.getElementById(fillId);
+                        if (!fill) {
+                            return;
+                        }
+
+                        analyser.getFloatTimeDomainData(samples);
+
+                        let sum = 0;
+                        for (let i = 0; i < samples.length; i++) {
+                            sum += samples[i] * samples[i];
+                        }
+
+                        // Same mapping the gate uses, so the marker lines up with
+                        // the level that actually opens the microphone.
+                        const db = 20 * Math.log10(Math.sqrt(sum / samples.length) || 1e-8);
+                        const percent = Math.max(0, Math.min(100, ((db + 70) / 55) * 100));
+
+                        fill.style.width = percent.toFixed(1) + "%";
+                        fill.style.background = percent >= cutoff ? "#3ba55d" : "#4e5058";
+                    }, 60)
+                };
+
+                return true;
+            } catch (error) {
+                console.warn("[valour] microphone meter unavailable", error);
+                return false;
+            }
+        },
+        stopMicMeter() {
+            stopMeter();
         }
     };
 })();

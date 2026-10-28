@@ -497,9 +497,19 @@ function noiseFilterSettings() {
 }
 
 async function attachNoiseFilter(track) {
-    if (!track || typeof track.setProcessor !== "function" || noiseFilterAttached.has(track)) {
+    if (!track || typeof track.setProcessor !== "function") {
         return;
     }
+
+    // The mixer script can still be loading when the microphone is published,
+    // and a failed attempt leaves the track in the set, so only treat the track
+    // as done once the mixer is actually running.
+    const mixerReady = window.valourSoundboard && window.valourSoundboard.isInCall();
+    if (mixerReady || (!window.valourSoundboard && noiseFilterAttached.has(track))) {
+        return;
+    }
+
+    window.valourAttachCalls = (window.valourAttachCalls || 0) + 1;
 
     const settings = noiseFilterSettings();
 
@@ -550,6 +560,31 @@ async function attachNoiseFilter(track) {
     }
 }
 
+// Re-attaches the processor for the current microphone. The soundboard panel
+// calls this before playing, so a cold start cannot leave the microphone raw.
+async function ensureMicrophoneProcessor() {
+    try {
+        const activeRoom = getRoomOrThrow();
+        const local = activeRoom.localParticipant;
+        const publication = typeof local.getTrackPublication === "function"
+            ? local.getTrackPublication("microphone")
+            : null;
+
+        if (!publication || !publication.track) {
+            return false;
+        }
+
+        await attachNoiseFilter(publication.track);
+
+        return !!(window.valourSoundboard && window.valourSoundboard.isInCall());
+    } catch (error) {
+        console.warn("[valour] unable to attach the microphone processor", error);
+        return false;
+    }
+}
+
+window.valourEnsureProcessor = ensureMicrophoneProcessor;
+
 export async function joinRoom(timeoutMs = 25000) {
     const activeRoom = getRoomOrThrow();
     if (!pendingConnect) {
@@ -595,6 +630,14 @@ export async function enableAudio() {
 
     if (publication && publication.track) {
         await attachNoiseFilter(publication.track);
+
+        // On a cold start the mixer script may not have executed yet, so retry
+        // once instead of publishing a raw microphone for the whole call.
+        if (!(window.valourSoundboard && window.valourSoundboard.isInCall())) {
+            setTimeout(() => {
+                void attachNoiseFilter(publication.track);
+            }, 2500);
+        }
     }
 }
 

@@ -165,16 +165,15 @@
 
         try
         {
-            var playing = await Js.InvokeAsync<bool>("valourSoundboard.play", sound.Url, 1.0);
+            // Make sure the microphone processor is attached, so the gate and
+            // noise suppression are live before anyone speaks.
+            await Js.InvokeVoidAsync("valourEnsureProcessor");
 
-            if (playing)
-            {
-                _status = "Playing: " + sound.Name;
-            }
-            else
-            {
-                _status = await Js.InvokeAsync<string>("valourSoundboard.status");
-            }
+            // The bot already publishes a track into the voice room, so clips go
+            // through it: every listener hears them, and nothing depends on the
+            // browser running its own audio graph.
+            var result = await Js.InvokeAsync<string>("valourSoundboard.postSound", sound.Url);
+            _status = string.IsNullOrWhiteSpace(result) ? "Playing: " + sound.Name : result;
         }
         catch (Exception ex)
         {
@@ -186,8 +185,8 @@
     {
         try
         {
-            await Js.InvokeVoidAsync("valourSoundboard.stopAll");
-            _status = "Stopped";
+            var result = await Js.InvokeAsync<string>("valourSoundboard.postStop");
+            _status = string.IsNullOrWhiteSpace(result) ? "Stopped" : result;
         }
         catch (Exception ex)
         {

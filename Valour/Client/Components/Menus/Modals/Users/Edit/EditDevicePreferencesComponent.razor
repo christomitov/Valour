@@ -2,6 +2,7 @@
 @inject ValourClient Client
 @inject RealtimeKitDeviceService RealtimeKitDeviceService
 @inject IJSRuntime JsRuntime
+@implements IDisposable
 
 <div class="settings-page">
 
@@ -114,6 +115,14 @@
             <input class="sensitivity-slider" style="width: 100%; accent-color: #5865f2; margin: 6px 0 4px;"
                    type="range" min="0" max="100" step="1" value="@_noiseGate" @onchange="OnChangeNoiseGate" />
             <p class="toggle-description">Microphone audio quieter than this is muted, like Discord's squelch. 0 turns the gate off. Applies the next time you turn your microphone on.</p>
+
+            <div class="mic-level">
+                <div class="mic-level-track">
+                    <div id="mic-level-fill" class="mic-level-fill"></div>
+                    <div class="mic-level-marker" style="left: @(_noiseGate)%;"></div>
+                </div>
+                <span class="mic-level-caption">Live input. The amber line is your cutoff.</span>
+            </div>
         </div>
 
         <div class="actions">
@@ -226,7 +235,10 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        _ = firstRender;
+        if (firstRender)
+        {
+            await StartMicMeterAsync();
+        }
 
         if (_hasInitializedDeviceLists || _isInitializingDeviceLists || _initialDeviceLoadAttempts >= MaxInitialDeviceLoadAttempts)
             return;
@@ -465,6 +477,30 @@
             _noiseGate = Math.Clamp(gateValue, 0, 100);
     }
 
+    private async Task StartMicMeterAsync()
+    {
+        try
+        {
+            await JsRuntime.InvokeAsync<bool>("valourSoundboard.startMicMeter", "mic-level-fill", _noiseGate);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[valour] microphone meter unavailable: " + ex.Message);
+        }
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            _ = JsRuntime.InvokeVoidAsync("valourSoundboard.stopMicMeter");
+        }
+        catch (Exception)
+        {
+            // The JS runtime is already gone during teardown.
+        }
+    }
+
     private async Task OnChangeNoiseGate(ChangeEventArgs e)
     {
         if (!int.TryParse(e.Value?.ToString(), out var value))
@@ -472,6 +508,7 @@
 
         _noiseGate = Math.Clamp(value, 0, 100);
         await LocalStorage.SetStringAsync("valour.noiseGate.threshold", _noiseGate.ToString());
+        await StartMicMeterAsync();
     }
 
     private async Task SwitchNoiseSuppression()
