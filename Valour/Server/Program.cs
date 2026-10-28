@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using Npgsql;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
@@ -225,6 +225,25 @@ public partial class Program
         {
             app.UseSentryTracing();
         }
+
+        // dotnet.js embeds the fingerprinted asset list but is not itself
+        // fingerprinted, so a cached copy pins the client to an old build.
+        app.Use(async (context, next) =>
+        {
+            var path = context.Request.Path.Value ?? string.Empty;
+
+            if (path.EndsWith("/_framework/dotnet.js", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith("/_framework/blazor.webassembly.js", StringComparison.OrdinalIgnoreCase))
+            {
+                context.Response.OnStarting(() =>
+                {
+                    context.Response.Headers.CacheControl = "no-cache";
+                    return Task.CompletedTask;
+                });
+            }
+
+            await next();
+        });
 
         app.UseBlazorFrameworkFiles();
         app.MapStaticAssets();
