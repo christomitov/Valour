@@ -7,6 +7,24 @@ namespace Valour.Client.Components.Windows.ChannelWindows;
 
 public static class ChannelWindowFactory
 {
+    /// <summary>
+    /// The focused tab when it is showing a channel, so channel navigation can
+    /// replace the current view instead of stacking a new tab.
+    /// </summary>
+    public static WindowTab FocusedChannelTab
+    {
+        get
+        {
+            var tab = WindowService.FocusedTab;
+            var type = tab?.Content?.ComponentType;
+
+            if (type == typeof(ChatWindowComponent) || type == typeof(CallWindowComponent))
+                return tab;
+
+            return null;
+        }
+    }
+
     public static async Task<WindowContent?> GetDefaultContent(Channel channel)
     {
         if (ISharedChannel.ChatChannelTypes.Contains(channel.ChannelType))
