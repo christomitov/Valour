@@ -117,7 +117,7 @@
             return false;
 
         await CloseAsync();
-        await InvokeAsync(() => WindowService.OpenWindowAtFocused(content, ChannelWindowFactory.FocusedChannelTab));
+        await InvokeAsync(() => WindowService.OpenWindowAtFocused(content));
         return true;
     }
 

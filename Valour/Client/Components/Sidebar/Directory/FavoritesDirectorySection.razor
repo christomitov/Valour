@@ -150,7 +150,7 @@
         var newWindowContent = await ChannelWindowFactory.GetDefaultContent(channel);
         if (newWindowContent is not null)
         {
-            await WindowService.OpenWindowAtFocused(newWindowContent, ChannelWindowFactory.FocusedChannelTab);
+            await WindowService.OpenWindowAtFocused(newWindowContent);
             await Sidebar.ToggleMobileSidebar();
         }
     }

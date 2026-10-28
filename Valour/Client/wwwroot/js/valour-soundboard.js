@@ -37,12 +37,19 @@
     }
 
     function readSettings() {
-        var settings = { enabled: false, quality: "medium", gate: 0 };
+        var settings = { enabled: true, quality: "medium", gate: 0 };
 
         try {
-            settings.enabled = window.localStorage.getItem("valour.noiseFilter.enabled") === "true";
-            settings.quality = window.localStorage.getItem("valour.noiseFilter.quality") || "medium";
-            settings.gate = parseInt(window.localStorage.getItem("valour.noiseGate.threshold") || "0", 10) || 0;
+            if (window.localStorage.getItem("valour.noiseFilter.enabled") === "false")
+                settings.enabled = false;
+
+            var quality = window.localStorage.getItem("valour.noiseFilter.quality");
+            if (quality === "low" || quality === "medium" || quality === "high")
+                settings.quality = quality;
+
+            var gate = parseInt(window.localStorage.getItem("valour.noiseGate.threshold") || "0", 10);
+            if (Number.isFinite(gate) && gate > 0)
+                settings.gate = Math.min(100, Math.max(0, gate));
         } catch (error) {
             // Private mode or a native host without localStorage: keep defaults.
         }
