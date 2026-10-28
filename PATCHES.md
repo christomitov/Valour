@@ -21,6 +21,14 @@ docker build --build-arg SHORTHASH=<short sha> -t valour-sauce:1 .
    so switching channels replaces the focused channel tab instead of stacking a
    new one. Only fires when the focused tab is itself a chat or call window.
 
+2. **Krisp noise suppression** (`f177388c`): vendors
+   `@livekit/krisp-noise-filter` 0.4.5 at
+   `Valour/Client/wwwroot/js/krisp-noise-filter.umd.js` and attaches it as a
+   track processor on the published microphone track in
+   `livekit.interop.js`, so peers receive denoised audio. The filter runs in the
+   speaker's browser and pulls its models from LiveKit's public model endpoint,
+   so no LiveKit Cloud account is needed. Unsupported browsers are skipped.
+
 ## Syncing with upstream
 
 ```
