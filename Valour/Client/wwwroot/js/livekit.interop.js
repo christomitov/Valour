@@ -448,6 +448,7 @@ const KRISP_SCRIPT_PATH = "_content/Valour.Client/js/krisp-noise-filter.umd.js";
 const KRISP_GLOBAL_NAME = "LiveKit Noise Filter";
 let krispLoadPromise = null;
 const noiseFilterAttached = new WeakSet();
+const processorAttachments = new WeakMap();
 
 function loadKrispModule() {
     if (krispLoadPromise) {
@@ -501,14 +502,26 @@ async function attachNoiseFilter(track) {
         return;
     }
 
-    // The mixer script can still be loading when the microphone is published,
-    // and a failed attempt leaves the track in the set, so only treat the track
-    // as done once the mixer is actually running.
-    const mixerReady = window.valourSoundboard && window.valourSoundboard.isInCall();
-    if (mixerReady || (!window.valourSoundboard && noiseFilterAttached.has(track))) {
+    // Several callers can race here (the publish path, the retry timer and the
+    // panel), so the in-flight promise is recorded before the first await.
+    const pending = processorAttachments.get(track);
+    if (pending) {
+        await pending;
         return;
     }
 
+    const work = attachTrack(track);
+    processorAttachments.set(track, work);
+
+    try {
+        await work;
+    } catch (error) {
+        processorAttachments.delete(track);
+        throw error;
+    }
+}
+
+async function attachTrack(track) {
     window.valourAttachCalls = (window.valourAttachCalls || 0) + 1;
 
     const settings = noiseFilterSettings();
@@ -574,6 +587,13 @@ async function ensureMicrophoneProcessor() {
             return false;
         }
 
+        if (window.valourSoundboard && window.valourSoundboard.isInCall()) {
+            return true;
+        }
+
+        // A previous attempt may have resolved without leaving a live mixer, so
+        // clear the recorded promise and attach again.
+        processorAttachments.delete(publication.track);
         await attachNoiseFilter(publication.track);
 
         return !!(window.valourSoundboard && window.valourSoundboard.isInCall());

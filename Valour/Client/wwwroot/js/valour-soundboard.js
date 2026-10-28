@@ -1,324 +1,381 @@
-/**
- * Client-side soundboard mixer and microphone gate.
+/*
+ * Valour microphone processor.
  *
- * Discord plays soundboard clips into your own outgoing voice stream, so every
- * listener hears them without a bot in the call. This module does the same for
- * Valour: it wraps the microphone track processor so clips are mixed into the
- * published track *after* the noise filter, which stops Krisp from treating a
- * clip as background noise and suppressing it.
+ * Clips are posted to the Music bot, which mixes them into the track it already
+ * publishes into the voice room. This file owns only the outgoing microphone:
+ * Krisp noise suppression followed by an RMS gate, so typing and background
+ * noise never reach the room.
  *
- * It also implements Discord's squelch: when the input sensitivity threshold is
- * set, microphone audio below that level is gated out, so a keyboard, fan or TV
- * does not reach the room.
- *
- * Loaded on demand by livekit.interop.js; nothing else references it.
+ * LiveKit's LocalTrack.setProcessor() ignores whatever init() returns, reads
+ * processor.processedTrack, and calls destroy() and restart() on the processor,
+ * so those are part of the contract here.
  */
 (function () {
     "use strict";
 
-    if (window.valourSoundboard) {
-        return;
+    var GATE_HOLD_MS = 220;
+    var GATE_RELEASE = 0.02;
+    var GATE_ATTACK = 0.005;
+    var METER_INTERVAL_MS = 60;
+
+    // The 0..100 slider maps onto -70 dB to -15 dB, matching the settings meter.
+    var METER_FLOOR_DB = -70;
+    var METER_SPAN_DB = 55;
+
+    var mixer = null;
+    var meter = null;
+    var meterGeneration = 0;
+
+    function createContext() {
+        var Ctor = window.AudioContext || window.webkitAudioContext;
+
+        if (!Ctor) {
+            throw new Error("Web Audio is not available");
+        }
+
+        return new Ctor({ latencyHint: "interactive" });
     }
 
-    const MAX_CACHED_CLIPS = 32;
-    const bufferCache = new Map();
-    const activeSources = new Set();
-    let mixer = null;
-    let meter = null;
+    function readSettings() {
+        var settings = { enabled: false, quality: "medium", gate: 0 };
+
+        try {
+            settings.enabled = window.localStorage.getItem("valour.noiseFilter.enabled") === "true";
+            settings.quality = window.localStorage.getItem("valour.noiseFilter.quality") || "medium";
+            settings.gate = parseInt(window.localStorage.getItem("valour.noiseGate.threshold") || "0", 10) || 0;
+        } catch (error) {
+            // Private mode or a native host without localStorage: keep defaults.
+        }
+
+        return settings;
+    }
+
+    function SoundboardMixProcessor(krisp, settings) {
+        this.name = "valour-soundboard";
+        this.krisp = krisp || null;
+        this.settings = settings || {};
+        this.lastOptions = null;
+
+        this.context = null;
+        this.ownsContext = false;
+        this.source = null;
+        this.gain = null;
+        this.analyser = null;
+        this.destination = null;
+        this.krispProcessor = null;
+
+        this.processedTrack = null;
+        this.gateTimer = null;
+        this.gateOpen = false;
+        this.lastAboveAt = 0;
+        this.destroyed = false;
+        this.samples = null;
+    }
+
+    SoundboardMixProcessor.prototype.init = async function (options) {
+        options = options || {};
+        this.lastOptions = options;
+        this.destroyed = false;
+
+        var inputTrack = options.track;
+        if (!inputTrack) {
+            throw new Error("processor init needs a track");
+        }
+
+        // LiveKit hands us its own context and media element. Reusing them keeps
+        // the graph on the same clock as the published track.
+        this.context = options.audioContext || createContext();
+        this.ownsContext = !options.audioContext;
+
+        try {
+            var resume = this.context.resume();
+            if (resume && typeof resume.catch === "function") {
+                resume.catch(function (error) {
+                    console.warn("[valour] audio context resume failed", error);
+                });
+            }
+        } catch (error) {
+            console.warn("[valour] audio context resume failed", error);
+        }
+
+        window.valourMixerStage = "context";
+
+        var micTrack = inputTrack;
+        var settings = this.settings;
+
+        if (this.krisp && settings.enabled) {
+            try {
+                this.krispProcessor = this.krisp.KrispNoiseFilter({ quality: settings.quality });
+
+                // Krisp reads options.audioContext.sampleRate during init, so the
+                // context and a media element must be supplied or it throws.
+                await this.krispProcessor.init({
+                    kind: "audio",
+                    track: inputTrack,
+                    element: options.element || document.createElement("audio"),
+                    audioContext: this.context
+                });
+
+                // Krisp sets processedTrack on itself and returns nothing.
+                if (this.krispProcessor.processedTrack) {
+                    micTrack = this.krispProcessor.processedTrack;
+                    window.valourKrispState = "active";
+                } else {
+                    window.valourKrispState = "no processed track";
+                }
+            } catch (error) {
+                window.valourKrispState = "failed: " + (error && error.message ? error.message : String(error));
+                console.warn("[valour] Krisp failed, publishing the raw microphone", error);
+            }
+        } else {
+            window.valourKrispState = this.krisp ? "disabled" : "not loaded";
+        }
+
+        window.valourMixerStage = "krisp";
+
+        this.source = this.context.createMediaStreamSource(new MediaStream([micTrack]));
+        this.analyser = this.context.createAnalyser();
+        this.analyser.fftSize = 512;
+        this.analyser.smoothingTimeConstant = 0.4;
+        this.samples = new Float32Array(this.analyser.fftSize);
+
+        this.gain = this.context.createGain();
+        this.gain.gain.value = 1;
+        this.destination = this.context.createMediaStreamDestination();
+
+        this.source.connect(this.analyser);
+        this.source.connect(this.gain);
+        this.gain.connect(this.destination);
+
+        // LiveKit replaces the outgoing track with this one, so the gate and
+        // Krisp are what listeners actually receive.
+        this.processedTrack = this.destination.stream.getAudioTracks()[0];
+
+        this.startGate();
+        window.valourMixerStage = "attached";
+        mixer = this;
+
+        return this;
+    };
+
+    SoundboardMixProcessor.prototype.startGate = function () {
+        var self = this;
+
+        clearInterval(this.gateTimer);
+
+        this.gateTimer = setInterval(function () {
+            if (self.destroyed || !self.analyser || !self.gain) {
+                return;
+            }
+
+            var threshold = self.settings.gate || 0;
+
+            if (threshold <= 0) {
+                // Gate disabled: leave the microphone open.
+                self.gateOpen = true;
+                self.gain.gain.setTargetAtTime(1, self.context.currentTime, GATE_ATTACK);
+                return;
+            }
+
+            self.analyser.getFloatTimeDomainData(self.samples);
+
+            var sum = 0;
+            for (var i = 0; i < self.samples.length; i++) {
+                sum += self.samples[i] * self.samples[i];
+            }
+
+            var db = 20 * Math.log10(Math.sqrt(sum / self.samples.length) || 1e-8);
+            var cutoffDb = METER_FLOOR_DB + (threshold / 100) * METER_SPAN_DB;
+            var now = performance.now();
+
+            if (db >= cutoffDb) {
+                self.lastAboveAt = now;
+                self.gateOpen = true;
+            } else if (now - self.lastAboveAt > GATE_HOLD_MS) {
+                self.gateOpen = false;
+            }
+
+            var target = self.gateOpen ? 1 : 0;
+            var ramp = self.gateOpen ? GATE_ATTACK : GATE_RELEASE;
+
+            self.gain.gain.setTargetAtTime(target, self.context.currentTime, ramp);
+        }, 40);
+    };
+
+    SoundboardMixProcessor.prototype.applySettings = function (settings) {
+        this.settings = settings || this.settings;
+    };
+
+    SoundboardMixProcessor.prototype.destroy = function () {
+        if (this.destroyed) {
+            return;
+        }
+
+        this.destroyed = true;
+        clearInterval(this.gateTimer);
+        this.gateTimer = null;
+
+        try { if (this.source) { this.source.disconnect(); } } catch (error) { /* already disconnected */ }
+        try { if (this.analyser) { this.analyser.disconnect(); } } catch (error) { /* already disconnected */ }
+        try { if (this.gain) { this.gain.disconnect(); } } catch (error) { /* already disconnected */ }
+
+        if (this.krispProcessor && typeof this.krispProcessor.destroy === "function") {
+            try { this.krispProcessor.destroy(); } catch (error) { /* already destroyed */ }
+        }
+
+        this.krispProcessor = null;
+        this.source = null;
+        this.analyser = null;
+        this.gain = null;
+
+        if (this.ownsContext && this.context) {
+            try { this.context.close(); } catch (error) { /* already closed */ }
+        }
+
+        this.context = null;
+        this.processedTrack = null;
+
+        if (mixer === this) {
+            mixer = null;
+        }
+    };
+
+    SoundboardMixProcessor.prototype.restart = async function (options) {
+        // LiveKit calls this after a device switch. Rebuild the graph around the
+        // new track instead of leaving a stale one attached.
+        var next = options && options.track ? options : this.lastOptions;
+
+        if (!next || !next.track) {
+            return;
+        }
+
+        this.destroy();
+        await this.init(next);
+    };
+
+    SoundboardMixProcessor.prototype.status = function () {
+        if (this.processedTrack) {
+            return "Microphone processed, Krisp " + (window.valourKrispState || "unknown");
+        }
+
+        return "Microphone not processed";
+    };
 
     function stopMeter() {
+        meterGeneration++;
+
         if (!meter) {
             return;
         }
 
         clearInterval(meter.timer);
 
-        try { meter.stream.getAudioTracks().forEach(track => track.stop()); } catch (error) { /* already stopped */ }
+        try { meter.stream.getAudioTracks().forEach(function (track) { track.stop(); }); } catch (error) { /* already stopped */ }
         try { meter.context.close(); } catch (error) { /* already closed */ }
 
         meter = null;
     }
 
-    function createContext() {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        return new AudioContextClass({ latencyHint: "interactive" });
-    }
-
-    class SoundboardMixProcessor {
-        constructor(krisp, settings) {
-            this.name = "valour-soundboard";
-            this.krisp = krisp;
-            this.settings = settings || { enabled: false, quality: "medium", gate: 0 };
-            this.context = null;
-            this.destination = null;
-            this.gateTimer = null;
-        }
-
-        async init(options) {
-            const inputTrack = options.track;
-            let micTrack = inputTrack;
-
-            const context = createContext();
-
-            // Do not await resume(). An autoplay-blocked context leaves that
-            // promise pending, which previously aborted the whole processor and
-            // left the microphone raw, with no Krisp and no mixer.
-            try {
-                const resume = context.resume();
-                if (resume && typeof resume.catch === "function") {
-                    resume.catch(error => console.warn("[valour] audio context resume failed", error));
-                }
-            } catch (error) {
-                console.warn("[valour] audio context resume failed", error);
-            }
-
-            window.valourMixerStage = "context";
-
-            if (this.krisp && this.settings.enabled) {
-                try {
-                    const processor = this.krisp.KrispNoiseFilter({ quality: this.settings.quality });
-
-                    // Krisp reads options.audioContext.sampleRate during init, so
-                    // the context and a media element have to be supplied or it
-                    // throws immediately and the microphone stays raw.
-                    const result = await processor.init({
-                        kind: "audio",
-                        track: inputTrack,
-                        element: document.createElement("audio"),
-                        audioContext: context
-                    });
-
-                    if (result && result.processedTrack) {
-                        micTrack = result.processedTrack;
-                        window.valourKrispState = "active";
-                    } else {
-                        window.valourKrispState = "no processed track";
-                    }
-                } catch (error) {
-                    window.valourKrispState = "failed: " + (error && error.message ? error.message : String(error));
-                    console.warn("[valour] Krisp failed, publishing the raw microphone", error);
-                }
-            } else {
-                window.valourKrispState = this.krisp ? "disabled" : "not loaded";
-            }
-
-            window.valourMixerStage = "krisp";
-
-            const micSource = context.createMediaStreamSource(new MediaStream([micTrack]));
-            const destination = context.createMediaStreamDestination();
-
-            this.context = context;
-            this.destination = destination;
-            this.micSource = micSource;
-            this.gate = this.settings.gate > 0 ? this.settings.gate : 0;
-
-            if (this.gate > 0) {
-                this.attachGate(context, micSource, destination);
-            } else {
-                micSource.connect(destination);
-            }
-
-            window.valourMixerStage = "attached";
-            mixer = this;
-
-            return {
-                processedTrack: destination.stream.getAudioTracks()[0],
-                destroy: async () => {
-                    if (mixer === this) {
-                        mixer = null;
-                    }
-
-                    this.stopAll();
-
-                    if (this.gateTimer) {
-                        clearInterval(this.gateTimer);
-                        this.gateTimer = null;
-                    }
-
-                    try { this.micSource.disconnect(); } catch (error) { /* already gone */ }
-                    try { await context.close(); } catch (error) { /* already closed */ }
-                }
-            };
-        }
-
-        attachGate(context, source, destination) {
-            const analyser = context.createAnalyser();
-            analyser.fftSize = 512;
-            analyser.smoothingTimeConstant = 0.3;
-
-            const gate = context.createGain();
-            gate.gain.value = 0;
-
-            source.connect(analyser);
-            source.connect(gate);
-            gate.connect(destination);
-
-            const samples = new Float32Array(analyser.fftSize);
-
-            // The slider runs 1..100 and maps onto a usable range of speech
-            // levels, where 100 is the most aggressive gate.
-            const thresholdDb = -70 + (this.gate / 100) * 55;
-
-            this.gateTimer = setInterval(() => {
-                analyser.getFloatTimeDomainData(samples);
-
-                let sum = 0;
-                for (let i = 0; i < samples.length; i++) {
-                    sum += samples[i] * samples[i];
-                }
-
-                const rms = Math.sqrt(sum / samples.length);
-                const db = 20 * Math.log10(rms || 1e-8);
-                const open = db > thresholdDb;
-
-                gate.gain.setTargetAtTime(open ? 1 : 0, context.currentTime, open ? 0.01 : 0.06);
-            }, 40);
-        }
-
-        stopAll() {
-            for (const source of activeSources) {
-                try { source.stop(); } catch (error) { /* not started */ }
-            }
-            activeSources.clear();
-        }
-
-        async play(url, volume) {
-            if (!this.destination) {
-                return false;
-            }
-
-            const buffer = await this.loadBuffer(url);
-            const source = this.context.createBufferSource();
-            source.buffer = buffer;
-
-            const gain = this.context.createGain();
-            gain.gain.value = typeof volume === "number" ? volume : 1;
-            source.connect(gain);
-
-            // Into the outgoing mic track, so everyone in the room hears it.
-            // Clips bypass the gate, otherwise quiet clips would be squelched.
-            gain.connect(this.destination);
-
-            // Into the local output too, so the sender hears their own clip.
-            if (this.context.destination) {
-                gain.connect(this.context.destination);
-            }
-
-            activeSources.add(source);
-            source.onended = () => {
-                activeSources.delete(source);
-                try { gain.disconnect(); } catch (error) { /* already gone */ }
-            };
-            source.start();
-            return true;
-        }
-
-        async loadBuffer(url) {
-            const cached = bufferCache.get(url);
-            if (cached) {
-                return cached;
-            }
-
-            const response = await fetch(url, { cache: "force-cache" });
-            if (!response.ok) {
-                throw new Error("sound fetch failed: HTTP " + response.status);
-            }
-
-            const data = await response.arrayBuffer();
-            const buffer = await this.context.decodeAudioData(data);
-
-            if (bufferCache.size >= MAX_CACHED_CLIPS) {
-                bufferCache.delete(bufferCache.keys().next().value);
-            }
-            bufferCache.set(url, buffer);
-            return buffer;
-        }
-    }
-
     window.valourSoundboard = {
-        createProcessor: (krisp, settings) => new SoundboardMixProcessor(krisp, settings),
-        isInCall: () => !!mixer,
-        status() {
+        createProcessor: function (krisp, settings) {
+            return new SoundboardMixProcessor(krisp, settings || readSettings());
+        },
+
+        isInCall: function () {
+            return !!mixer;
+        },
+
+        status: function () {
             if (mixer) {
-                return "In call, Krisp " + (window.valourKrispState || "unknown");
+                return mixer.status();
             }
 
             if (window.valourLastMixerError) {
-                const error = window.valourLastMixerError;
-                return "Mixer failed: " + (error && error.message ? error.message : String(error));
+                return "Mixer failed: " + window.valourLastMixerError;
             }
 
-            return "Turn your microphone on to hear clips";
+            return "Microphone not processed";
         },
-        async play(url, volume) {
-            if (!mixer) {
-                return false;
-            }
-            return mixer.play(url, volume);
-        },
-        stopAll() {
-            if (mixer) {
-                mixer.stopAll();
-            }
-        },
+
         async postSound(url) {
-            const response = await fetch("/sb/sound", {
+            var response = await fetch("/sb/sound", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ query: url })
             });
 
-            return await response.text();
+            var body = await response.text();
+
+            if (!response.ok) {
+                throw new Error(body || ("soundboard returned " + response.status));
+            }
+
+            return body;
         },
+
         async postStop() {
-            const response = await fetch("/sb/stop", { method: "POST" });
-            return await response.text();
+            var response = await fetch("/sb/stop", { method: "POST" });
+            var body = await response.text();
+
+            if (!response.ok) {
+                throw new Error(body || ("soundboard returned " + response.status));
+            }
+
+            return body;
         },
+
         async startMicMeter(fillId, threshold) {
             stopMeter();
 
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                const context = createContext();
+            var generation = meterGeneration;
 
-                const resume = context.resume();
-                if (resume && typeof resume.catch === "function") {
-                    resume.catch(() => { /* autoplay blocked, the analyser still reads */ });
+            try {
+                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                // The component can be disposed while the permission prompt is up.
+                if (generation !== meterGeneration) {
+                    stream.getAudioTracks().forEach(function (track) { track.stop(); });
+                    return false;
                 }
 
-                const source = context.createMediaStreamSource(stream);
-                const analyser = context.createAnalyser();
+                var context = createContext();
+
+                var resume = context.resume();
+                if (resume && typeof resume.catch === "function") {
+                    resume.catch(function () { /* autoplay blocked, the analyser still reads */ });
+                }
+
+                var source = context.createMediaStreamSource(stream);
+                var analyser = context.createAnalyser();
                 analyser.fftSize = 512;
                 analyser.smoothingTimeConstant = 0.4;
                 source.connect(analyser);
 
-                const samples = new Float32Array(analyser.fftSize);
-                const cutoff = typeof threshold === "number" ? threshold : 0;
+                var samples = new Float32Array(analyser.fftSize);
 
                 meter = {
-                    stream,
-                    context,
-                    timer: setInterval(() => {
-                        const fill = document.getElementById(fillId);
-                        if (!fill) {
+                    stream: stream,
+                    context: context,
+                    threshold: typeof threshold === "number" ? threshold : 0,
+                    timer: setInterval(function () {
+                        var fill = document.getElementById(fillId);
+                        if (!fill || !meter) {
                             return;
                         }
 
                         analyser.getFloatTimeDomainData(samples);
 
-                        let sum = 0;
-                        for (let i = 0; i < samples.length; i++) {
+                        var sum = 0;
+                        for (var i = 0; i < samples.length; i++) {
                             sum += samples[i] * samples[i];
                         }
 
-                        // Same mapping the gate uses, so the marker lines up with
-                        // the level that actually opens the microphone.
-                        const db = 20 * Math.log10(Math.sqrt(sum / samples.length) || 1e-8);
-                        const percent = Math.max(0, Math.min(100, ((db + 70) / 55) * 100));
+                        var db = 20 * Math.log10(Math.sqrt(sum / samples.length) || 1e-8);
+                        var percent = Math.max(0, Math.min(100, ((db - METER_FLOOR_DB) / METER_SPAN_DB) * 100));
 
                         fill.style.width = percent.toFixed(1) + "%";
-                        fill.style.background = percent >= cutoff ? "#3ba55d" : "#4e5058";
-                    }, 60)
+                        fill.style.background = percent >= meter.threshold ? "#3ba55d" : "#4e5058";
+                    }, METER_INTERVAL_MS)
                 };
 
                 return true;
@@ -327,6 +384,13 @@
                 return false;
             }
         },
+
+        setMeterThreshold(value) {
+            if (meter) {
+                meter.threshold = typeof value === "number" ? value : 0;
+            }
+        },
+
         stopMicMeter() {
             stopMeter();
         }

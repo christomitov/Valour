@@ -167,7 +167,15 @@
         {
             // Make sure the microphone processor is attached, so the gate and
             // noise suppression are live before anyone speaks.
-            await Js.InvokeVoidAsync("valourEnsureProcessor");
+            try
+            {
+                await Js.InvokeVoidAsync("valourEnsureProcessor");
+            }
+            catch (Exception)
+            {
+                // The interop module may not be imported yet; playback does not
+                // depend on it.
+            }
 
             // The bot already publishes a track into the voice room, so clips go
             // through it: every listener hears them, and nothing depends on the

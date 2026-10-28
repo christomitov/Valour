@@ -2,7 +2,7 @@
 @inject ValourClient Client
 @inject RealtimeKitDeviceService RealtimeKitDeviceService
 @inject IJSRuntime JsRuntime
-@implements IDisposable
+@implements IAsyncDisposable
 
 <div class="settings-page">
 
@@ -489,11 +489,23 @@
         }
     }
 
-    public void Dispose()
+    private async Task SetMeterThresholdAsync()
     {
         try
         {
-            _ = JsRuntime.InvokeVoidAsync("valourSoundboard.stopMicMeter");
+            await JsRuntime.InvokeVoidAsync("valourSoundboard.setMeterThreshold", _noiseGate);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[valour] microphone meter threshold unavailable: " + ex.Message);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("valourSoundboard.stopMicMeter");
         }
         catch (Exception)
         {
@@ -508,7 +520,7 @@
 
         _noiseGate = Math.Clamp(value, 0, 100);
         await LocalStorage.SetStringAsync("valour.noiseGate.threshold", _noiseGate.ToString());
-        await StartMicMeterAsync();
+        await SetMeterThresholdAsync();
     }
 
     private async Task SwitchNoiseSuppression()
