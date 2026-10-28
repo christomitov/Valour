@@ -1,0 +1,210 @@
+@using System.Text.Json.Serialization
+@inject HttpClient Http
+@inject IJSRuntime Js
+@inject SoundboardState State
+@implements IDisposable
+
+@if (State.IsOpen)
+{
+    <div class="sb-panel">
+        <div class="sb-head">
+            <span class="sb-title">Soundboard</span>
+            <button type="button" class="sb-close" aria-label="Close soundboard" @onclick="State.Close">&#10005;</button>
+        </div>
+
+        <div class="sb-tabs">
+            <button type="button" class="sb-tab @(Tab == SoundboardTab.All ? "active" : string.Empty)" @onclick="() => SelectTabAsync(SoundboardTab.All)">Sounds</button>
+            <button type="button" class="sb-tab @(Tab == SoundboardTab.Favorites ? "active" : string.Empty)" @onclick="() => SelectTabAsync(SoundboardTab.Favorites)">Favorites</button>
+        </div>
+
+        <input class="sb-search" type="text" placeholder="Find the perfect sound" @bind="_search" @bind:event="oninput" />
+
+        <div class="sb-grid">
+            @if (_loading)
+            {
+                <span class="sb-empty">Loading...</span>
+            }
+            else if (Filtered.Count == 0)
+            {
+                <span class="sb-empty">No sounds matched.</span>
+            }
+            else
+            {
+                @foreach (var sound in Filtered)
+                {
+                    <button type="button" class="sb-tile" @onclick="() => PlayAsync(sound)">
+                        <span class="sb-name">@sound.Name</span>
+                        @if (sound.Tags.Count > 0)
+                        {
+                            <span class="sb-tag">@sound.Tags[0]</span>
+                        }
+                    </button>
+                }
+            }
+        </div>
+
+        <div class="sb-foot">
+            <button type="button" class="sb-stop" @onclick="StopAsync">Stop sounds</button>
+            <span class="sb-status">@_status</span>
+        </div>
+    </div>
+}
+
+@code {
+    private enum SoundboardTab
+    {
+        All,
+        Favorites
+    }
+
+    private SoundboardTab Tab = SoundboardTab.All;
+    private string _search = string.Empty;
+    private string _status = string.Empty;
+    private bool _loading;
+    private bool _wasOpen;
+    private List<SoundboardSound> _sounds = new();
+    private List<SoundboardSound> _favorites = new();
+
+    private List<SoundboardSound> Filtered
+    {
+        get
+        {
+            var source = Tab == SoundboardTab.Favorites ? _favorites : _sounds;
+            var needle = _search.Trim().ToLowerInvariant();
+
+            IEnumerable<SoundboardSound> matches = needle.Length == 0
+                ? source
+                : source.Where(sound =>
+                    sound.Name.ToLowerInvariant().Contains(needle) ||
+                    sound.Tags.Any(tag => tag.ToLowerInvariant().Contains(needle)));
+
+            return matches.Take(150).ToList();
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        State.Changed += OnStateChangedAsync;
+    }
+
+    public void Dispose()
+    {
+        State.Changed -= OnStateChangedAsync;
+    }
+
+    private async void OnStateChangedAsync()
+    {
+        try
+        {
+            if (State.IsOpen && !_wasOpen)
+            {
+                _wasOpen = true;
+                await LoadAsync(Tab);
+            }
+            else if (!State.IsOpen)
+            {
+                _wasOpen = false;
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            _status = "Soundboard error: " + ex.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task LoadAsync(SoundboardTab tab)
+    {
+        _loading = true;
+        _status = "Loading...";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var url = tab == SoundboardTab.Favorites ? "sb/favorites" : "sb/list";
+            var payload = await Http.GetFromJsonAsync<SoundboardListResponse>(url);
+            var sounds = payload?.Sounds ?? new List<SoundboardSound>();
+
+            if (tab == SoundboardTab.Favorites)
+                _favorites = sounds;
+            else
+                _sounds = sounds;
+
+            _status = sounds.Count + " sounds";
+        }
+        catch (Exception ex)
+        {
+            _status = "Could not load sounds: " + ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task SelectTabAsync(SoundboardTab tab)
+    {
+        Tab = tab;
+
+        var needsLoad = tab == SoundboardTab.Favorites
+            ? _favorites.Count == 0
+            : _sounds.Count == 0;
+
+        if (needsLoad)
+            await LoadAsync(tab);
+        else
+            StateHasChanged();
+    }
+
+    private async Task PlayAsync(SoundboardSound sound)
+    {
+        _status = "Playing: " + sound.Name;
+
+        try
+        {
+            var playing = await Js.InvokeAsync<bool>("valourSoundboard.play", sound.Url, 1.0);
+            _status = playing ? "Playing: " + sound.Name : "Join a voice channel to play sounds";
+        }
+        catch (Exception ex)
+        {
+            _status = "Failed: " + ex.Message;
+        }
+    }
+
+    private async Task StopAsync()
+    {
+        try
+        {
+            await Js.InvokeVoidAsync("valourSoundboard.stopAll");
+            _status = "Stopped";
+        }
+        catch (Exception ex)
+        {
+            _status = "Failed: " + ex.Message;
+        }
+    }
+
+    public class SoundboardSound
+    {
+        [JsonPropertyName("id")]
+        public long Id { get; set; }
+
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("tags")]
+        public List<string> Tags { get; set; } = new();
+
+        [JsonPropertyName("url")]
+        public string Url { get; set; } = string.Empty;
+    }
+
+    public class SoundboardListResponse
+    {
+        [JsonPropertyName("sounds")]
+        public List<SoundboardSound>? Sounds { get; set; }
+    }
+}

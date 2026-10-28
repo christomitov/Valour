@@ -5,6 +5,7 @@ using Valour.Client.Components.Sidebar.Directory;
 using Valour.Client.ContextMenu;
 using Valour.Client.Device;
 using Valour.Client.Sounds;
+using Valour.Client.Soundboard;
 using Valour.Client.Utility;
 using Valour.Sdk.Client;
 using Valour.Sdk.Services;
@@ -39,6 +40,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<RealtimeKitHostService>();
         services.AddScoped<GlobalCallSessionService>();
         services.AddScoped<RealtimeKitDeviceService>();
+        services.AddSingleton<SoundboardState>();
         services.AddScoped<UploadService>();
         // Native shells replace the web launcher with the system browser.
         services.AddScoped<IExternalAuthLauncher, WebExternalAuthLauncher>();

@@ -2,6 +2,7 @@
 @implements IAsyncDisposable
 @inject ValourClient Client
 @inject Valour.Client.Storage.IAppStorage BrowserStorage
+@inject SoundboardState SoundboardState
 
 @using System.Net.Http.Headers
 @using System.Text.RegularExpressions
@@ -123,6 +124,10 @@
             <i class="bi bi-emoji-smile"></i>
         </button>
 
+        <button type="button" class="input-action-btn soundboard-button @(EncryptionBlocksInput ? "encryption-blocked" : string.Empty)" title="Soundboard" aria-label="Open soundboard" @onclick="@ToggleSoundboard" @onclick:stopPropagation="true">
+            <i class="bi bi-music-note-beamed"></i>
+        </button>
+
         @if (DeviceInfo.IsMobile && CanUserPost){
             <div class="send-wrapper" @onclick="@OnSubmitClick" @onclick:stopPropagation="true" @onclick:preventDefault="true"
                  @onmousedown:preventDefault="true">
@@ -134,11 +139,16 @@
     </div>
 </div>
 
-
+<SoundboardPanel></SoundboardPanel>
 
 @code {
     
     private bool _loading = true;
+
+    private void ToggleSoundboard()
+    {
+        SoundboardState.Toggle();
+    }
     private long? _loadedPayBalancePlanetId;
     private Currency _localCurrency;
     private EcoAccount _localAccount;

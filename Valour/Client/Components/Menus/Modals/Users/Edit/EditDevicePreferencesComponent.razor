@@ -84,6 +84,28 @@
             </div>
         }
 
+        <div class="toggle-item">
+            <div class="toggle-header">
+                <span class="toggle-title">Noise suppression</span>
+                <label class="switch">
+                    <input type="checkbox" @onclick="SwitchNoiseSuppression" checked="@_noiseSuppressionEnabled">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+            <p class="toggle-description">Filters keyboard clatter, fans and room noise with Krisp before your microphone is sent. Applies the next time you turn your microphone on.</p>
+        </div>
+
+        @if (_noiseSuppressionEnabled)
+        {
+            <div class="form-group">
+                <select class="form-select" value="@_noiseSuppressionQuality" @onchange="OnChooseNoiseQuality">
+                    <option value="low">Low - weakest devices</option>
+                    <option value="medium">Medium - default</option>
+                    <option value="high">High - strongest filter</option>
+                </select>
+            </div>
+        }
+
         <div class="actions">
             @if (ShouldShowMicPermissionButton)
             {
@@ -189,6 +211,7 @@
     protected override async Task OnInitializedAsync()
     {
         await LoadErrorReportingStateAsync();
+        await LoadNoiseSuppressionStateAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -410,6 +433,35 @@
         }
 
         return false;
+    }
+
+    private bool _noiseSuppressionEnabled = true;
+    private string _noiseSuppressionQuality = "medium";
+
+    private async Task LoadNoiseSuppressionStateAsync()
+    {
+        var enabled = await LocalStorage.GetStringAsync("valour.noiseFilter.enabled");
+        _noiseSuppressionEnabled = !string.Equals(enabled, "false", StringComparison.OrdinalIgnoreCase);
+
+        var quality = await LocalStorage.GetStringAsync("valour.noiseFilter.quality");
+        if (quality is "low" or "medium" or "high")
+            _noiseSuppressionQuality = quality;
+    }
+
+    private async Task SwitchNoiseSuppression()
+    {
+        _noiseSuppressionEnabled = !_noiseSuppressionEnabled;
+        await LocalStorage.SetStringAsync("valour.noiseFilter.enabled", _noiseSuppressionEnabled ? "true" : "false");
+    }
+
+    private async Task OnChooseNoiseQuality(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        if (value is not ("low" or "medium" or "high"))
+            return;
+
+        _noiseSuppressionQuality = value;
+        await LocalStorage.SetStringAsync("valour.noiseFilter.quality", value);
     }
 
     private async Task SwitchAutoEmojis()

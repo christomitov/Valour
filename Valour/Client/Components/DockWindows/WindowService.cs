@@ -25,6 +25,12 @@ public static class WindowService
     public static List<WindowTab> GlobalTabs { get; private set; } = new();
     public static List<ChatWindowComponent> GlobalChatTabs { get; private set; } = new();
 
+    /// <summary>
+    /// Discord-style single window: opening a channel replaces the content of the
+    /// open window instead of stacking tabs.
+    /// </summary>
+    public static bool SingleWindowMode { get; } = true;
+
     public static WindowTab FocusedTab { get; private set; }
 
     public static Planet FocusedPlanet { get; private set; }
@@ -193,6 +199,19 @@ public static class WindowService
             }
 
             return;
+        }
+
+        if (SingleWindowMode)
+        {
+            var current = FocusedTab;
+            if (current?.Component is not null)
+            {
+                if (object.ReferenceEquals(current.Content, tab.Content))
+                    return;
+
+                await current.Component.ReplaceAsync(tab.Content);
+                return;
+            }
         }
 
         var focusedLayout = FocusedTab?.Layout;

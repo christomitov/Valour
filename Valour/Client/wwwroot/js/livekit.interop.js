@@ -475,26 +475,59 @@ function loadKrispModule() {
     return krispLoadPromise;
 }
 
+function noiseFilterSettings() {
+    const settings = { enabled: true, quality: "medium" };
+
+    try {
+        if (window.localStorage.getItem("valour.noiseFilter.enabled") === "false")
+            settings.enabled = false;
+
+        const quality = window.localStorage.getItem("valour.noiseFilter.quality");
+        if (quality === "low" || quality === "medium" || quality === "high")
+            settings.quality = quality;
+    } catch (error) {
+        console.warn("[valour] Unable to read noise filter settings", error);
+    }
+
+    return settings;
+}
+
 async function attachNoiseFilter(track) {
     if (!track || typeof track.setProcessor !== "function" || noiseFilterAttached.has(track)) {
         return;
     }
 
-    try {
-        const krisp = await loadKrispModule();
-        if (!krisp || typeof krisp.KrispNoiseFilter !== "function") {
-            return;
-        }
+    const settings = noiseFilterSettings();
 
-        if (typeof krisp.isKrispNoiseFilterSupported === "function" && !krisp.isKrispNoiseFilterSupported()) {
-            return;
+    try {
+        let krisp = null;
+        if (settings.enabled) {
+            try {
+                krisp = await loadKrispModule();
+            } catch (error) {
+                console.warn("[valour] Krisp noise filter unavailable", error);
+            }
+
+            if (krisp && typeof krisp.KrispNoiseFilter !== "function") {
+                krisp = null;
+            }
+
+            if (krisp && typeof krisp.isKrispNoiseFilterSupported === "function" && !krisp.isKrispNoiseFilterSupported()) {
+                krisp = null;
+            }
         }
 
         noiseFilterAttached.add(track);
-        await track.setProcessor(krisp.KrispNoiseFilter());
+
+        const mixer = window.valourSoundboard;
+        if (mixer) {
+            await track.setProcessor(mixer.createProcessor(krisp, settings));
+        } else if (krisp) {
+            await track.setProcessor(krisp.KrispNoiseFilter({ quality: settings.quality }));
+        }
     } catch (error) {
         noiseFilterAttached.delete(track);
-        console.warn("[valour] Krisp noise filter unavailable", error);
+        console.warn("[valour] microphone processor unavailable", error);
     }
 }
 

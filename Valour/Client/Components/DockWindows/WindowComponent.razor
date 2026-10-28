@@ -16,8 +16,8 @@
          @onmousemove:stopPropagation="true"
          @onmousemove:preventDefault="true"
          style="@TabWrapperStyle">
-        @* Mobile does not have tabs *@
-        @if (!DeviceInfo.IsMobile)
+        @* Mobile and the single-window layout never show a tab strip *@
+        @if (!DeviceInfo.IsMobile && !WindowService.SingleWindowMode)
         {
             <div
                 class="tab"
