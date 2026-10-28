@@ -193,49 +193,29 @@
     }
 </script>
 <script>
-    // Installing the offline cache can fetch the entire application. On a new
-    // browser, wait until the initial app load is complete and the main thread
-    // is idle so service-worker precaching does not compete with Blazor boot.
-    const registerRes = new Promise((resolve, reject) => {
+    // Offline caching is deliberately not used. The service worker answered
+    // from its own cache before the network, so after a deploy the browser kept
+    // running the previous build until the worker happened to update. Nothing
+    // here needs offline support: any worker left behind by an older session is
+    // unregistered and its caches are dropped on every load. main.js already
+    // tolerates a missing updateAvailable promise, so it resolves to false.
+    window.updateAvailable = Promise.resolve(false);
+
+    (function () {
+        try {
+            if (window.caches) {
+                caches.keys().then(keys => keys.forEach(key => caches.delete(key)));
+            }
+        } catch (error) {
+            console.error('Could not clear offline caches:', error);
+        }
+
         if (!('serviceWorker' in navigator)) {
-            resolve(null);
             return;
         }
 
-        const register = () => navigator.serviceWorker.register('/service-worker.js').then(resolve, reject);
-        const schedule = () => {
-            if ('requestIdleCallback' in window) {
-                window.requestIdleCallback(register, { timeout: 5000 });
-            } else {
-                window.setTimeout(register, 1500);
-            }
-        };
-
-        if (document.readyState === 'complete') {
-            schedule();
-        } else {
-            window.addEventListener('load', schedule, { once: true });
-        }
-    });
-
-    window.updateAvailable = new Promise(function (resolve, reject) {
-        registerRes.then(function (registration) {
-                if (!registration) {
-                    resolve(false);
-                    return;
-                }
-
-                console.log('Registration successful, scope is:', registration.scope);
-                    registration.onupdatefound = () => {
-                        const installingWorker = registration.installing;
-                        installingWorker.onstatechange = () => {
-                            if (installingWorker.state === 'installed') {
-                                resolve(!!navigator.serviceWorker.controller);
-                            }
-                        };
-                    };
-                })
-                .catch(error =>
-                    console.log('Service worker registration failed, error:', error));
-    });
+        navigator.serviceWorker.getRegistrations()
+            .then(registrations => registrations.forEach(registration => registration.unregister()))
+            .catch(error => console.error('Could not unregister the service worker:', error));
+    })();
 </script>
